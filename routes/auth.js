@@ -168,6 +168,54 @@ router.post('/logout', authenticateToken, async (req, res) => {
     }
 });
 
+// Refresh token
+router.post('/refresh', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user.userId;
+        
+        // Get user info
+        const result = await pool.query(
+            'SELECT id, name, email, created_at FROM users WHERE id = $1',
+            [userId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        const user = result.rows[0];
+
+        // Generate new JWT token
+        const token = jwt.sign(
+            {
+                userId: user.id,
+                email: user.email,
+                name: user.name
+            },
+            process.env.JWT_SECRET,
+            { expiresIn: '7d' }
+        );
+
+        // Store new token in Redis
+        await storeToken(token, user.id, 7 * 24 * 60 * 60); // 7 days
+
+        res.json({
+            message: 'Token refreshed successfully',
+            token,
+            user: {
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                createdAt: user.created_at
+            }
+        });
+
+    } catch (error) {
+        console.error('Token refresh error:', error);
+        res.status(500).json({ error: 'Failed to refresh token' });
+    }
+});
+
 // Get current user profile
 router.get('/profile', authenticateToken, async (req, res) => {
     try {
