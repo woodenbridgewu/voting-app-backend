@@ -3,7 +3,7 @@ const Joi = require('joi');
 const multer = require('multer');
 const { v2: cloudinary } = require('cloudinary');
 const { pool } = require('../config/database');
-const { getCachedPollResults, cachePollResults } = require('../config/redis');
+const { getCachedPollResults, cachePollResults, hasVotedToday } = require('../config/redis');
 const { authenticateToken, optionalAuth } = require('../middleware/auth');
 
 const router = express.Router();
@@ -209,16 +209,23 @@ router.get('/', optionalAuth, async (req, res) => {
         const polls = [];
         for (const poll of pollsResult.rows) {
             const optionsResult = await pool.query(`
-        SELECT id, text, image_url, vote_count
-        FROM poll_options
-        WHERE poll_id = $1
-        ORDER BY created_at
+        SELECT 
+          po.id, po.text, po.image_url,
+          COUNT(vr.id) as actual_vote_count
+        FROM poll_options po
+        LEFT JOIN vote_records vr ON po.id = vr.option_id
+        WHERE po.poll_id = $1
+        GROUP BY po.id, po.text, po.image_url
+        ORDER BY po.created_at
       `, [poll.id]);
 
             polls.push({
                 ...poll,
                 totalVotes: parseInt(poll.total_votes),
-                options: optionsResult.rows
+                options: optionsResult.rows.map(option => ({
+                    ...option,
+                    voteCount: parseInt(option.actual_vote_count)
+                }))
             });
         }
 
@@ -289,21 +296,27 @@ router.get('/:id', optionalAuth, async (req, res) => {
         const totalVotes = parseInt(totalVotesResult.rows[0].total);
 
         // Check if current user has voted today (if authenticated)
-        let hasVotedToday = false;
+        let userHasVotedToday = false;
         if (req.user) {
-            const todayVoteResult = await pool.query(`
-        SELECT id FROM vote_records
-        WHERE user_id = $1 AND poll_id = $2 AND DATE(voted_at) = CURRENT_DATE
-      `, [req.user.userId, pollId]);
+            // Try Redis first, fallback to database
+            userHasVotedToday = await hasVotedToday(req.user.userId, pollId);
+            
+            // Double-check with database if Redis check fails
+            if (!userHasVotedToday) {
+                const todayVoteResult = await pool.query(`
+          SELECT id FROM vote_records
+          WHERE user_id = $1 AND poll_id = $2 AND DATE(voted_at) = CURRENT_DATE
+        `, [req.user.userId, pollId]);
 
-            hasVotedToday = todayVoteResult.rows.length > 0;
+                userHasVotedToday = todayVoteResult.rows.length > 0;
+            }
         }
 
         const result = {
             poll: {
                 ...poll,
                 totalVotes,
-                hasVotedToday,
+                hasVotedToday: userHasVotedToday,
                 canEdit: req.user?.userId === poll.creator_id,
                 options: optionsResult.rows.map(option => ({
                     id: option.id,
@@ -359,16 +372,23 @@ router.get('/my/polls', authenticateToken, async (req, res) => {
         const polls = [];
         for (const poll of pollsResult.rows) {
             const optionsResult = await pool.query(`
-        SELECT id, text, image_url, vote_count
-        FROM poll_options
-        WHERE poll_id = $1
-        ORDER BY created_at
+        SELECT 
+          po.id, po.text, po.image_url,
+          COUNT(vr.id) as actual_vote_count
+        FROM poll_options po
+        LEFT JOIN vote_records vr ON po.id = vr.option_id
+        WHERE po.poll_id = $1
+        GROUP BY po.id, po.text, po.image_url
+        ORDER BY po.created_at
       `, [poll.id]);
 
             polls.push({
                 ...poll,
                 totalVotes: parseInt(poll.total_votes),
-                options: optionsResult.rows
+                options: optionsResult.rows.map(option => ({
+                    ...option,
+                    voteCount: parseInt(option.actual_vote_count)
+                }))
             });
         }
 

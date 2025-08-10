@@ -1,7 +1,7 @@
 const express = require('express');
 const Joi = require('joi');
 const { pool, updateVoteCount } = require('../config/database');
-const { hasVotedToday, markAsVoted, cachePollResults } = require('../config/redis');
+const { hasVotedToday, markAsVoted, cachePollResults, getClient } = require('../config/redis');
 const { authenticateToken } = require('../middleware/auth');
 
 const router = express.Router();
@@ -101,7 +101,15 @@ router.post('/', authenticateToken, async (req, res) => {
         await client.query('COMMIT');
 
         // Clear cached poll results
-        await cachePollResults(pollId, null, 0); // Clear cache
+        try {
+            const redisClient = getClient();
+            if (redisClient && redisClient.isReady) {
+                const key = `poll_results:${pollId}`;
+                await redisClient.del(key);
+            }
+        } catch (error) {
+            console.error('Failed to clear cache:', error);
+        }
 
         res.status(201).json({
             message: 'Vote recorded successfully',
