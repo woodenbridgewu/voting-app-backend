@@ -192,7 +192,7 @@ router.get('/', optionalAuth, async (req, res) => {
       ${whereClause}
       GROUP BY p.id, u.name
       ORDER BY p.${sortColumn} ${order}
-      LIMIT ${paramCount++} OFFSET ${paramCount}
+      LIMIT $${paramCount} OFFSET $${paramCount + 1}
     `, queryParams);
 
         // Get options for each poll
