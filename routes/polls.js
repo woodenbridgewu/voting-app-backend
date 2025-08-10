@@ -151,12 +151,22 @@ router.get('/', optionalAuth, async (req, res) => {
         const search = req.query.search || '';
         const sortBy = req.query.sortBy || 'created_at';
         const sortOrder = req.query.sortOrder || 'DESC';
-        const isActive = req.query.active !== 'false';
-
+        const activeFilter = req.query.active;
+        
         // Build where clause
-        let whereClause = 'WHERE p.is_active = $1';
-        const queryParams = [isActive];
-        let paramCount = 2;
+        let whereClause = 'WHERE p.is_active = true';
+        const queryParams = [];
+        let paramCount = 1;
+        
+        // Handle active filter
+        if (activeFilter === 'true') {
+            // Only active polls that haven't ended
+            whereClause += ' AND (p.end_date IS NULL OR p.end_date > CURRENT_TIMESTAMP)';
+        } else if (activeFilter === 'false') {
+            // Only polls that have ended
+            whereClause += ' AND p.end_date IS NOT NULL AND p.end_date <= CURRENT_TIMESTAMP';
+        }
+        // If activeFilter is undefined or 'all', show all active polls (no additional filter)
 
         if (search) {
             whereClause += ` AND (p.title ILIKE $${paramCount} OR p.description ILIKE $${paramCount})`;
