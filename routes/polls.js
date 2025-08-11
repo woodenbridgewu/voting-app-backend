@@ -64,8 +64,11 @@ const uploadToCloudinary = (buffer, folder = 'voting-app') => {
     });
 };
 
-// Create a new poll
-router.post('/', authenticateToken, upload.array('images', 10), async (req, res) => {
+// Create a new poll (supports single cover image + optional option images)
+router.post('/', authenticateToken, upload.fields([
+    { name: 'coverImage', maxCount: 1 },
+    { name: 'images', maxCount: 10 }
+]), async (req, res) => {
     const client = await pool.connect();
 
     try {
@@ -83,16 +86,28 @@ router.post('/', authenticateToken, upload.array('images', 10), async (req, res)
         const { title, description, endDate, options } = value;
         const creatorId = req.user.userId;
 
+        // Handle cover image upload if provided
+        let coverImageUrl = null;
+        const coverFiles = (req.files && req.files['coverImage']) || [];
+        if (coverFiles.length > 0) {
+            try {
+                const uploadResult = await uploadToCloudinary(coverFiles[0].buffer, 'voting-app/covers');
+                coverImageUrl = uploadResult.secure_url;
+            } catch (uploadError) {
+                console.error('Cover image upload error:', uploadError);
+            }
+        }
+
         // Create the poll
         const pollResult = await client.query(
-            `INSERT INTO polls (title, description, creator_id, end_date, is_active) 
-       VALUES ($1, $2, $3, $4, $5) 
-       RETURNING id, title, description, start_date, end_date, is_active, created_at`,
-            [title, description || null, creatorId, endDate || null, true]
+            `INSERT INTO polls (title, description, creator_id, end_date, is_active, image_url) 
+       VALUES ($1, $2, $3, $4, $5, $6) 
+       RETURNING id, title, description, start_date, end_date, is_active, image_url, created_at`,
+            [title, description || null, creatorId, endDate || null, true, coverImageUrl]
         );
 
         const poll = pollResult.rows[0];
-        const images = req.files || [];
+        const images = (req.files && req.files['images']) || [];
         let imageIndex = 0;
 
         // Create poll options
@@ -193,7 +208,7 @@ router.get('/', optionalAuth, async (req, res) => {
         queryParams.push(limit, offset);
         const pollsResult = await pool.query(`
       SELECT 
-        p.id, p.title, p.description, p.start_date, p.end_date, p.is_active, p.created_at,
+        p.id, p.title, p.description, p.start_date, p.end_date, p.is_active, p.image_url, p.created_at,
         u.name as creator_name,
         COUNT(vr.id) as total_votes
       FROM polls p
@@ -261,7 +276,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
         // Get poll details
         const pollResult = await pool.query(`
       SELECT 
-        p.id, p.title, p.description, p.start_date, p.end_date, p.is_active, p.created_at,
+        p.id, p.title, p.description, p.start_date, p.end_date, p.is_active, p.image_url, p.created_at,
         u.name as creator_name, u.id as creator_id
       FROM polls p
       JOIN users u ON p.creator_id = u.id
@@ -358,7 +373,7 @@ router.get('/my/polls', authenticateToken, async (req, res) => {
         // Get user's polls
         const pollsResult = await pool.query(`
       SELECT 
-        p.id, p.title, p.description, p.start_date, p.end_date, p.is_active, p.created_at,
+        p.id, p.title, p.description, p.start_date, p.end_date, p.is_active, p.image_url, p.created_at,
         COUNT(vr.id) as total_votes
       FROM polls p
       LEFT JOIN vote_records vr ON p.id = vr.poll_id

@@ -37,6 +37,12 @@ const initDatabase = async () => {
       )
     `);
 
+    // Add image_url column for poll cover image if not exists
+    await pool.query(`
+      ALTER TABLE polls
+      ADD COLUMN IF NOT EXISTS image_url TEXT
+    `);
+
     // Create poll_options table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS poll_options (
