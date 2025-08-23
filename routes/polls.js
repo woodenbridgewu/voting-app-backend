@@ -39,7 +39,8 @@ const createPollSchema = Joi.object({
     options: Joi.array().items(
         Joi.object({
             text: Joi.string().min(1).max(100).required(),
-            hasImage: Joi.boolean().optional()
+            description: Joi.string().max(500).allow('').optional(),
+            imageCount: Joi.number().min(0).max(10).optional()
         })
     ).min(2).max(10).required()
 });
@@ -64,10 +65,10 @@ const uploadToCloudinary = (buffer, folder = 'voting-app') => {
     });
 };
 
-// Create a new poll (supports single cover image + optional option images)
+// Create a new poll (supports single cover image + multiple option images)
 router.post('/', authenticateToken, upload.fields([
     { name: 'coverImage', maxCount: 1 },
-    { name: 'images', maxCount: 10 }
+    { name: 'images', maxCount: 100 } // Allow up to 100 images total (10 per option * 10 options)
 ]), async (req, res) => {
     const client = await pool.connect();
 
@@ -114,28 +115,59 @@ router.post('/', authenticateToken, upload.fields([
         const createdOptions = [];
         for (let i = 0; i < options.length; i++) {
             const option = options[i];
-            let imageUrl = null;
+            
+            // Create the option first
+            const optionResult = await client.query(
+                `INSERT INTO poll_options (poll_id, text, description) 
+         VALUES ($1, $2, $3) 
+         RETURNING id, text, description, vote_count`,
+                [poll.id, option.text, option.description || null]
+            );
 
-            // If this option should have an image and we have images available
-            if (option.hasImage && imageIndex < images.length) {
+            const createdOption = optionResult.rows[0];
+            
+            // Handle multiple images for this option
+            const optionImageCount = option.imageCount || 0;
+            const optionImages = [];
+            
+            for (let j = 0; j < optionImageCount && imageIndex < images.length; j++) {
                 try {
                     const uploadResult = await uploadToCloudinary(images[imageIndex].buffer);
-                    imageUrl = uploadResult.secure_url;
+                    optionImages.push({
+                        imageUrl: uploadResult.secure_url,
+                        isPrimary: j === 0, // First image is primary
+                        displayOrder: j
+                    });
                     imageIndex++;
                 } catch (uploadError) {
                     console.error('Image upload error:', uploadError);
-                    // Continue without image rather than failing the whole request
+                    // Continue without this image
                 }
             }
-
-            const optionResult = await client.query(
-                `INSERT INTO poll_options (poll_id, text, image_url) 
-         VALUES ($1, $2, $3) 
-         RETURNING id, text, image_url, vote_count`,
-                [poll.id, option.text, imageUrl]
+            
+            // Insert images into poll_option_images table
+            for (const imageData of optionImages) {
+                await client.query(
+                    `INSERT INTO poll_option_images (option_id, image_url, is_primary, display_order) 
+             VALUES ($1, $2, $3, $4)`,
+                    [createdOption.id, imageData.imageUrl, imageData.isPrimary, imageData.displayOrder]
+                );
+            }
+            
+            // Get the primary image URL for backward compatibility
+            const primaryImageResult = await client.query(
+                `SELECT image_url FROM poll_option_images 
+         WHERE option_id = $1 AND is_primary = true 
+         ORDER BY display_order LIMIT 1`,
+                [createdOption.id]
             );
-
-            createdOptions.push(optionResult.rows[0]);
+            
+            const primaryImageUrl = primaryImageResult.rows.length > 0 ? primaryImageResult.rows[0].image_url : null;
+            
+            createdOptions.push({
+                ...createdOption,
+                imageUrl: primaryImageUrl
+            });
         }
 
         await client.query('COMMIT');
@@ -225,22 +257,37 @@ router.get('/', optionalAuth, async (req, res) => {
         for (const poll of pollsResult.rows) {
             const optionsResult = await pool.query(`
         SELECT 
-          po.id, po.text, po.image_url,
+          po.id, po.text, po.description,
           COUNT(vr.id) as actual_vote_count
         FROM poll_options po
         LEFT JOIN vote_records vr ON po.id = vr.option_id
         WHERE po.poll_id = $1
-        GROUP BY po.id, po.text, po.image_url
+        GROUP BY po.id, po.text, po.description
         ORDER BY po.created_at
       `, [poll.id]);
+
+            // Get primary image for each option
+            const optionsWithImages = [];
+            for (const option of optionsResult.rows) {
+                const primaryImageResult = await pool.query(`
+          SELECT image_url FROM poll_option_images 
+          WHERE option_id = $1 AND is_primary = true 
+          ORDER BY display_order LIMIT 1
+        `, [option.id]);
+                
+                const primaryImageUrl = primaryImageResult.rows.length > 0 ? primaryImageResult.rows[0].image_url : null;
+                
+                optionsWithImages.push({
+                    ...option,
+                    imageUrl: primaryImageUrl,
+                    voteCount: parseInt(option.actual_vote_count)
+                });
+            }
 
             polls.push({
                 ...poll,
                 totalVotes: parseInt(poll.total_votes),
-                options: optionsResult.rows.map(option => ({
-                    ...option,
-                    voteCount: parseInt(option.actual_vote_count)
-                }))
+                options: optionsWithImages
             });
         }
 
@@ -292,12 +339,12 @@ router.get('/:id', optionalAuth, async (req, res) => {
         // Get poll options with vote counts
         const optionsResult = await pool.query(`
       SELECT 
-        po.id, po.text, po.image_url, po.vote_count,
+        po.id, po.text, po.description, po.vote_count,
         COUNT(vr.id) as actual_vote_count
       FROM poll_options po
       LEFT JOIN vote_records vr ON po.id = vr.option_id
       WHERE po.poll_id = $1
-      GROUP BY po.id, po.text, po.image_url, po.vote_count
+      GROUP BY po.id, po.text, po.description, po.vote_count
       ORDER BY po.created_at
     `, [pollId]);
 
@@ -327,19 +374,40 @@ router.get('/:id', optionalAuth, async (req, res) => {
             }
         }
 
+        // Get images for each option
+        const optionsWithImages = [];
+        for (const option of optionsResult.rows) {
+            const imagesResult = await pool.query(`
+        SELECT image_url, is_primary, display_order
+        FROM poll_option_images
+        WHERE option_id = $1
+        ORDER BY display_order
+      `, [option.id]);
+
+            const images = imagesResult.rows.map(img => ({
+                url: img.image_url,
+                isPrimary: img.is_primary,
+                displayOrder: img.display_order
+            }));
+
+            optionsWithImages.push({
+                id: option.id,
+                text: option.text,
+                description: option.description,
+                images: images,
+                imageUrl: images.length > 0 ? images.find(img => img.isPrimary)?.url || images[0].url : null,
+                voteCount: parseInt(option.actual_vote_count),
+                percentage: totalVotes > 0 ? Math.round((option.actual_vote_count / totalVotes) * 100) : 0
+            });
+        }
+
         const result = {
             poll: {
                 ...poll,
                 totalVotes,
                 hasVotedToday: userHasVotedToday,
                 canEdit: req.user?.userId === poll.creator_id,
-                options: optionsResult.rows.map(option => ({
-                    id: option.id,
-                    text: option.text,
-                    imageUrl: option.image_url,
-                    voteCount: parseInt(option.actual_vote_count),
-                    percentage: totalVotes > 0 ? Math.round((option.actual_vote_count / totalVotes) * 100) : 0
-                }))
+                options: optionsWithImages
             }
         };
 
@@ -388,22 +456,37 @@ router.get('/my/polls', authenticateToken, async (req, res) => {
         for (const poll of pollsResult.rows) {
             const optionsResult = await pool.query(`
         SELECT 
-          po.id, po.text, po.image_url,
+          po.id, po.text, po.description,
           COUNT(vr.id) as actual_vote_count
         FROM poll_options po
         LEFT JOIN vote_records vr ON po.id = vr.option_id
         WHERE po.poll_id = $1
-        GROUP BY po.id, po.text, po.image_url
+        GROUP BY po.id, po.text, po.description
         ORDER BY po.created_at
       `, [poll.id]);
+
+            // Get primary image for each option
+            const optionsWithImages = [];
+            for (const option of optionsResult.rows) {
+                const primaryImageResult = await pool.query(`
+          SELECT image_url FROM poll_option_images 
+          WHERE option_id = $1 AND is_primary = true 
+          ORDER BY display_order LIMIT 1
+        `, [option.id]);
+                
+                const primaryImageUrl = primaryImageResult.rows.length > 0 ? primaryImageResult.rows[0].image_url : null;
+                
+                optionsWithImages.push({
+                    ...option,
+                    imageUrl: primaryImageUrl,
+                    voteCount: parseInt(option.actual_vote_count)
+                });
+            }
 
             polls.push({
                 ...poll,
                 totalVotes: parseInt(poll.total_votes),
-                options: optionsResult.rows.map(option => ({
-                    ...option,
-                    voteCount: parseInt(option.actual_vote_count)
-                }))
+                options: optionsWithImages
             });
         }
 

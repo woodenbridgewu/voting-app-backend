@@ -49,8 +49,26 @@ const initDatabase = async () => {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         poll_id UUID REFERENCES polls(id) ON DELETE CASCADE,
         text VARCHAR(255) NOT NULL,
-        image_url TEXT,
+        description TEXT,
         vote_count INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Add description column if not exists
+    await pool.query(`
+      ALTER TABLE poll_options
+      ADD COLUMN IF NOT EXISTS description TEXT
+    `);
+
+    // Create poll_option_images table for multiple images per option
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS poll_option_images (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        option_id UUID REFERENCES poll_options(id) ON DELETE CASCADE,
+        image_url TEXT NOT NULL,
+        is_primary BOOLEAN DEFAULT false,
+        display_order INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -73,6 +91,7 @@ const initDatabase = async () => {
       CREATE INDEX IF NOT EXISTS idx_poll_options_poll_id ON poll_options(poll_id);
       CREATE INDEX IF NOT EXISTS idx_vote_records_user_poll ON vote_records(user_id, poll_id);
       CREATE INDEX IF NOT EXISTS idx_vote_records_poll_id ON vote_records(poll_id);
+      CREATE INDEX IF NOT EXISTS idx_poll_option_images_option_id ON poll_option_images(option_id);
     `);
 
     console.log('✅ Database initialized successfully');
