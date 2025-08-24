@@ -39,7 +39,7 @@ const createPollSchema = Joi.object({
     options: Joi.array().items(
         Joi.object({
             text: Joi.string().min(1).max(100).required(),
-            description: Joi.string().max(500).allow('').optional(),
+            description: Joi.string().max(500).optional(),
             imageCount: Joi.number().min(0).max(10).optional()
         })
     ).min(2).max(10).required()
@@ -419,6 +419,72 @@ router.get('/:id', optionalAuth, async (req, res) => {
     } catch (error) {
         console.error('Get poll error:', error);
         res.status(500).json({ error: 'Failed to fetch poll' });
+    }
+});
+
+// Get single poll option by ID
+router.get('/:pollId/options/:optionId', async (req, res) => {
+    try {
+        const { pollId, optionId } = req.params;
+
+        // 1. Get option details
+        const optionResult = await pool.query(`
+            SELECT id, poll_id, text, description 
+            FROM poll_options 
+            WHERE id = $1 AND poll_id = $2
+        `, [optionId, pollId]);
+
+        if (optionResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Poll option not found' });
+        }
+
+        const option = optionResult.rows[0];
+
+        // 2. Get all images for the option
+        const imagesResult = await pool.query(`
+            SELECT image_url, is_primary, display_order 
+            FROM poll_option_images 
+            WHERE option_id = $1 
+            ORDER BY display_order
+        `, [optionId]);
+
+        const images = imagesResult.rows.map(img => ({
+            url: img.image_url,
+            isPrimary: img.is_primary,
+            displayOrder: img.display_order
+        }));
+
+        // 3. Get vote count for this specific option
+        const voteCountResult = await pool.query(`
+            SELECT COUNT(*) as count 
+            FROM vote_records 
+            WHERE option_id = $1
+        `, [optionId]);
+        
+        const voteCount = parseInt(voteCountResult.rows[0].count);
+
+        // 4. Get total votes for the parent poll
+        const totalVotesResult = await pool.query(`
+            SELECT COUNT(*) as total 
+            FROM vote_records 
+            WHERE poll_id = $1
+        `, [pollId]);
+
+        const totalVotes = parseInt(totalVotesResult.rows[0].total);
+
+        // 5. Assemble the final result
+        const result = {
+            ...option,
+            images,
+            voteCount,
+            percentage: totalVotes > 0 ? Math.round((voteCount / totalVotes) * 100) : 0
+        };
+
+        res.json(result);
+
+    } catch (error) {
+        console.error('Get poll option error:', error);
+        res.status(500).json({ error: 'Failed to fetch poll option' });
     }
 });
 
