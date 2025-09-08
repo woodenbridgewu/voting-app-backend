@@ -1,8 +1,29 @@
 const { Pool } = require('pg');
+const { URL } = require('url');
+
+// Determine SSL settings to be compatible with Supabase
+let sslOption = false;
+try {
+  if (process.env.DATABASE_URL) {
+    const parsed = new URL(process.env.DATABASE_URL);
+    const isSupabase = parsed.hostname && parsed.hostname.includes('supabase');
+    const sslmode = parsed.searchParams.get('sslmode');
+    if (isSupabase || sslmode === 'require') {
+      sslOption = { rejectUnauthorized: false };
+    }
+  }
+} catch (_) {
+  // Fallback to environment-driven behavior when URL parsing fails
+}
+
+// Allow explicit override via env var
+if (process.env.DATABASE_SSL === 'true' || process.env.PGSSLMODE === 'require') {
+  sslOption = { rejectUnauthorized: false };
+}
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: sslOption
 });
 
 // Database schema initialization
